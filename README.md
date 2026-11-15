@@ -276,6 +276,7 @@ wxpush file -caption 日报 a.pdf    # 图片/视频/文件按扩展名自动识
 wxpush check                       # 静默检查 token 是否有效（不发消息，不能预测配额）
 wxpush whoami
 wxpush probe -interval 3s          # 连续发带编号的消息直到被拒，实测配额
+wxpush quota                       # 查看剩余配额（-reset 在对方回复后重置）
 ```
 
 退出码：`0` 成功，`1` 错误，`2` 参数错误，`3` 无会话/配额用完（需在微信里给 Bot 发一条消息）。
@@ -296,6 +297,23 @@ p.File(ctx, "", "a.png", data, "说明")
 
 `ilink` 核心包保持零依赖；`rsc.io/qr` 仅被 `cmd/wxpush` 引用。
 
+### 发送配额与提醒（`quota` 包）
+
+接收方并不知道「每发 1 条消息，Bot 只能回 10 条」。为避免第 11 条起悄悄发不出去，
+约定**第 10 条（最后一条）附带提醒**：
+
+> 构建完成 ✅
+>
+> 💬 回复任意消息，可继续接收后续通知
+
+- `quota.Counter`：按接收人计数（`Inbound` 重置、`Sent` 累加、`Refused` 以服务端 `ret=-2` 为准），可 JSON 持久化
+- `quota.Nudge(pending)` / `quota.WithNudge(text, pending)` / `quota.Cost(hasMedia, hasCaption)`
+- `push.Pusher.UseQuota(c)`：自动在最后一条附加提醒；文件遇到只剩 1 条时改发提醒并返回 `push.ErrQuotaDeferred`；
+  看不到对方回复，因此「计数已满但发送成功」即推断对方已回复、计数重置
+- `wxpush` 默认启用，计数存在 `<creds>.quota.json`；`wxpush quota` 查看，`wxpush quota -reset` 手动重置，`-no-quota` 关闭
+
+完整的「超额排队、对方回复后自动补发」需要能收到消息的长连接进程，见 [openilink-hub](https://github.com/agentiker/openilink-hub)。
+
 ## iLink 协议实测行为
 
 iLink 没有公开文档。以下是用真实服务端测出的行为，由 `live_test.go` 固化（`-tags live`）：
@@ -306,13 +324,13 @@ iLink 没有公开文档。以下是用真实服务端测出的行为，由 `liv
 | 用户从未给 Bot 发过消息 | `sendmessage` → `ret=-2 prepare failed`，`getconfig` → `ret=-4` |
 | `context_token` | **不必需、不校验**：不传 / 传伪造值 / 传真实值，结果相同。与上游插件一致（缺 token 仅告警照发） |
 | 发送配额 | 用户每发 1 条消息，Bot 可向其发 **10 条**（文本、图片、文件、媒体的 caption 各算 1 条）。第 11 条 → `ret=-2`。与时间无关：31 秒内即可用完 |
-| 配额恢复 | 用户再发 1 条消息即恢复 10 条 |
+| 配额恢复 | 用户再发 1 条消息即**重置为 10 条**，剩余的不累加（实测：用 3 条后用户连发 2 条，仍只能再发 7 条） |
 | `getconfig` | 只反映「是否互动过」，配额用完后仍返回成功，**不能**用来预测能否发送 |
 | 未知接收人 | `ret=-3 invalid arguments` |
 | bot_token 无效 | `errcode=-14 session timeout` |
 | 必需请求头 | 缺少 `AuthorizationType` / `iLink-App-Id` 等 → `errcode=-14` |
 
-**未测**：配额是否跨多条用户消息累加；没有新的用户消息时配额多久失效（时间窗口）；同一 Bot 面对多个用户时是否分别计数。
+**未测**：没有新的用户消息时配额多久失效（时间窗口）；同一 Bot 面对多个用户时是否分别计数。
 
 运行 live 测试（会给你发 6 条消息，请先在微信里给 Bot 发一条）：
 

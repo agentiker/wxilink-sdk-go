@@ -8,10 +8,14 @@
 //	p.Text(ctx, "", "build finished") // "" = the WeChat user who scanned
 //
 // iLink only delivers to users who have recently messaged the bot, and
-// limits how many messages the bot may send per user message (observed: 10).
-// After login, send any message to the bot from WeChat before pushing;
-// refused sends fail with an *ilink.APIError where IsNoSession() is true.
-// Sending the bot another message from WeChat restores the allowance.
+// allows 10 messages per user message (see package quota). After login,
+// send any message to the bot from WeChat before pushing; refused sends fail
+// with an *ilink.APIError where IsNoSession() is true. Sending the bot
+// another message from WeChat restores the allowance.
+//
+// With [Pusher.UseQuota], the Pusher counts sends and puts a "reply to keep
+// receiving" nudge into the last allowed message, so the recipient knows
+// what to do instead of silently missing notifications.
 package push
 
 import (
@@ -24,6 +28,7 @@ import (
 	"time"
 
 	ilink "github.com/agentiker/wxilink-sdk-go"
+	"github.com/agentiker/wxilink-sdk-go/quota"
 )
 
 // Credentials are the long-lived result of a QR login.
@@ -129,6 +134,48 @@ func Login(ctx context.Context, opts *LoginOptions) (*Credentials, error) {
 type Pusher struct {
 	client *ilink.Client
 	creds  *Credentials
+	quota  *quota.Counter
+}
+
+// ErrQuotaDeferred is returned by [Pusher.File] when only the last message
+// of the allowance is left: the nudge was sent instead of the file, which
+// should be retried after the recipient replies.
+var ErrQuotaDeferred = errors.New("push: send allowance nearly used up; sent a reply-request instead of the file, retry after the recipient replies")
+
+// UseQuota enables send counting with c (typically loaded from and saved to
+// a file between runs). Pass nil to disable.
+//
+// A Pusher cannot see inbound messages, so it infers a reset: when the
+// counter says the allowance is used up but a send succeeds, the recipient
+// must have replied in the meantime.
+func (p *Pusher) UseQuota(c *quota.Counter) { p.quota = c }
+
+// Quota returns the counter set with UseQuota, or nil.
+func (p *Pusher) Quota() *quota.Counter { return p.quota }
+
+// account updates the counter after a send attempt that would cost n.
+func (p *Pusher) account(to string, believedRemaining, n int, err error) {
+	if p.quota == nil {
+		return
+	}
+	if err == nil {
+		if believedRemaining <= 0 {
+			p.quota.Inbound(to) // must have replied; inferred reset
+		}
+		p.quota.Sent(to, n)
+		return
+	}
+	var ae *ilink.APIError
+	if errors.As(err, &ae) && ae.IsNoSession() {
+		p.quota.Refused(to)
+	}
+}
+
+func (p *Pusher) remaining(to string) int {
+	if p.quota == nil {
+		return quota.Limit // unlimited as far as we know
+	}
+	return p.quota.Remaining(to)
 }
 
 // New creates a Pusher. Extra options are applied after the base URL from
@@ -159,25 +206,54 @@ func (p *Pusher) recipient(to string) (string, error) {
 }
 
 // Text sends a text message. An empty to means the user who scanned the QR.
-// Returns the client_id of the sent message.
+// Returns the client_id of the sent message. With UseQuota, the last
+// allowed message gets the reply nudge appended.
 func (p *Pusher) Text(ctx context.Context, to, text string) (string, error) {
 	to, err := p.recipient(to)
 	if err != nil {
 		return "", err
 	}
-	return p.client.Push(ctx, to, text)
+	rem := p.remaining(to)
+	if p.quota != nil && rem == 1 {
+		text = quota.WithNudge(text, 0)
+	}
+	id, err := p.client.Push(ctx, to, text)
+	p.account(to, rem, 1, err)
+	return id, err
 }
 
 // File uploads data and sends it as an image, video or file attachment,
 // chosen from fileName's extension. A non-empty caption is sent first as a
 // separate text message.
+//
+// With UseQuota: if the file is the last allowed message, the nudge goes
+// into the caption (cost 2 needs 2 left); if only 1 is left the nudge is
+// sent instead of the file and [ErrQuotaDeferred] is returned.
 func (p *Pusher) File(ctx context.Context, to, fileName string, data []byte, caption string) error {
 	to, err := p.recipient(to)
 	if err != nil {
 		return err
 	}
+	rem := p.remaining(to)
+	if p.quota != nil && rem > 0 {
+		cost := quota.Cost(true, caption != "")
+		switch {
+		case rem == 1:
+			_, err := p.client.Push(ctx, to, quota.Nudge(1))
+			p.account(to, rem, 1, err)
+			if err != nil {
+				return err
+			}
+			return ErrQuotaDeferred
+		case rem-cost <= 0:
+			// This file uses up the allowance: carry the nudge in the caption.
+			caption = quota.WithNudge(caption, 0)
+		}
+	}
 	token, _ := p.client.GetContextToken(to)
-	return p.client.SendMediaFile(ctx, to, token, data, fileName, caption)
+	err = p.client.SendMediaFile(ctx, to, token, data, fileName, caption)
+	p.account(to, rem, quota.Cost(true, caption != ""), err)
+	return err
 }
 
 // Check verifies, without sending a visible message, that the bot token is

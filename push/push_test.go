@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	ilink "github.com/agentiker/wxilink-sdk-go"
+	"github.com/agentiker/wxilink-sdk-go/quota"
 )
 
 // fakeILink simulates the subset of the iLink API used by push.
@@ -212,5 +213,128 @@ func TestCheck(t *testing.T) {
 	}
 	if len(f.sent) != 0 {
 		t.Error("Check must not send messages")
+	}
+}
+
+func texts(f *fakeILink) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for _, m := range f.sent {
+		for _, it := range m.Msg.ItemList {
+			if it.TextItem != nil {
+				out = append(out, it.TextItem.Text)
+			} else {
+				out = append(out, "<media>")
+			}
+		}
+	}
+	return out
+}
+
+func TestQuota_NudgeOnLastMessage(t *testing.T) {
+	f := newFake(t)
+	p := New(&Credentials{BotToken: "tok", BaseURL: f.srv.URL, ILinkUserID: "me"})
+	c := quota.New(quota.Limit)
+	p.UseQuota(c)
+	ctx := context.Background()
+	for i := 0; i < 10; i++ {
+		if _, err := p.Text(ctx, "", "msg"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := texts(f)
+	for i, txt := range got[:9] {
+		if strings.Contains(txt, "💬") {
+			t.Errorf("message %d has nudge too early: %q", i+1, txt)
+		}
+	}
+	if !strings.HasPrefix(got[9], "msg\n\n💬") {
+		t.Errorf("10th message = %q, want nudge appended", got[9])
+	}
+	if c.Remaining("me") != 0 {
+		t.Errorf("remaining = %d", c.Remaining("me"))
+	}
+}
+
+func TestQuota_InferredResetAfterReply(t *testing.T) {
+	f := newFake(t)
+	p := New(&Credentials{BotToken: "tok", BaseURL: f.srv.URL, ILinkUserID: "me"})
+	c := quota.New(quota.Limit)
+	c.Sent("me", 10) // believed exhausted
+	p.UseQuota(c)
+	// Server accepts → the user must have replied meanwhile.
+	if _, err := p.Text(context.Background(), "", "after reply"); err != nil {
+		t.Fatal(err)
+	}
+	if r := c.Remaining("me"); r != 9 {
+		t.Errorf("remaining = %d, want 9 after inferred reset + 1 send", r)
+	}
+	if strings.Contains(texts(f)[0], "💬") {
+		t.Error("no nudge expected right after a reset")
+	}
+}
+
+func TestQuota_RefusalMarksExhausted(t *testing.T) {
+	f := newFake(t)
+	f.sendReply = `{"ret":-2,"errmsg":"prepare failed"}`
+	p := New(&Credentials{BotToken: "tok", BaseURL: f.srv.URL, ILinkUserID: "me"})
+	c := quota.New(quota.Limit)
+	p.UseQuota(c)
+	if _, err := p.Text(context.Background(), "", "x"); err == nil {
+		t.Fatal("expected error")
+	}
+	if c.Remaining("me") != 0 {
+		t.Errorf("remaining = %d, want 0 after server refusal", c.Remaining("me"))
+	}
+}
+
+func TestQuota_FileOnLastSlotIsDeferred(t *testing.T) {
+	f := newFake(t)
+	p := New(&Credentials{BotToken: "tok", BaseURL: f.srv.URL, ILinkUserID: "me"})
+	c := quota.New(quota.Limit)
+	c.Sent("me", 9)
+	p.UseQuota(c)
+	err := p.File(context.Background(), "", "a.png", []byte("\x89PNG"), "")
+	if !errors.Is(err, ErrQuotaDeferred) {
+		t.Fatalf("got %v, want ErrQuotaDeferred", err)
+	}
+	got := texts(f)
+	if len(got) != 1 || !strings.Contains(got[0], "1 条消息待接收") {
+		t.Errorf("sent = %q, want only the nudge", got)
+	}
+	if f.uploads != 0 {
+		t.Error("file must not be uploaded")
+	}
+}
+
+func TestQuota_FileWithCaptionCarriesNudge(t *testing.T) {
+	f := newFake(t)
+	p := New(&Credentials{BotToken: "tok", BaseURL: f.srv.URL, ILinkUserID: "me"})
+	c := quota.New(quota.Limit)
+	c.Sent("me", 8) // 2 left: caption + file use both
+	p.UseQuota(c)
+	if err := p.File(context.Background(), "", "a.pdf", []byte("%PDF"), "日报"); err != nil {
+		t.Fatal(err)
+	}
+	got := texts(f)
+	if len(got) != 2 || !strings.HasPrefix(got[0], "日报\n\n💬") || got[1] != "<media>" {
+		t.Errorf("sent = %q", got)
+	}
+	if c.Remaining("me") != 0 {
+		t.Errorf("remaining = %d", c.Remaining("me"))
+	}
+}
+
+func TestQuota_Disabled(t *testing.T) {
+	f := newFake(t)
+	p := New(&Credentials{BotToken: "tok", BaseURL: f.srv.URL, ILinkUserID: "me"})
+	for i := 0; i < 12; i++ {
+		p.Text(context.Background(), "", "x")
+	}
+	for _, txt := range texts(f) {
+		if strings.Contains(txt, "💬") {
+			t.Fatal("no nudges without UseQuota")
+		}
 	}
 }

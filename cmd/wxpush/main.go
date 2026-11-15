@@ -7,6 +7,11 @@
 //	wxpush file -caption 日报 a.pdf  # image / video / file by extension
 //	wxpush check                     # silent token/interaction check (no message sent)
 //	wxpush probe -interval 10s       # measure the send allowance (sends real messages)
+//	wxpush quota [-reset]            # show / reset the local send counter
+//
+// iLink allows 10 messages per message the recipient sends to the bot. wxpush
+// counts sends in <creds>.quota.json and appends "回复任意消息…" to the 10th,
+// so the recipient knows to reply. Disable with -no-quota or WXILINK_NO_QUOTA=1.
 //
 // Credentials: -creds flag > $WXILINK_CREDS > <UserConfigDir>/wxilink/credentials.json
 package main
@@ -28,6 +33,7 @@ import (
 
 	ilink "github.com/agentiker/wxilink-sdk-go"
 	"github.com/agentiker/wxilink-sdk-go/push"
+	"github.com/agentiker/wxilink-sdk-go/quota"
 	"rsc.io/qr"
 )
 
@@ -47,11 +53,14 @@ Usage:
   wxpush check  [-creds PATH] [-to USER]
   wxpush whoami [-creds PATH]
   wxpush probe  [-creds PATH] [-to USER] [-interval 10s] [-max 50] [-log FILE]
+  wxpush quota  [-creds PATH] [-to USER] [-reset]
 
 USER defaults to the WeChat account that scanned the QR code.
-The recipient must have sent at least one message to the bot.
+iLink allows 10 messages per message the recipient sends to the bot; the
+10th carries a "reply to keep receiving" note. send/file accept -no-quota.
 
-Exit codes: 0 ok, 1 error, 2 usage, 3 no session (user must message the bot)
+Exit codes: 0 ok, 1 error, 2 usage,
+            3 recipient must message the bot first (allowance used up / no session)
 `
 
 func main() {
@@ -77,6 +86,8 @@ func main() {
 		err = cmdWhoami(args)
 	case "probe":
 		err = cmdProbe(ctx, args)
+	case "quota":
+		err = cmdQuota(args)
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		return
@@ -101,6 +112,9 @@ func exitCode(err error) int {
 	if errors.As(err, &ae) && (ae.IsNoSession() || ae.Ret == -4) {
 		return exitNoSession
 	}
+	if errors.Is(err, push.ErrQuotaDeferred) {
+		return exitNoSession
+	}
 	return exitErr
 }
 
@@ -112,7 +126,7 @@ func describe(err error) string {
 	}
 	switch {
 	case ae.IsNoSession(), ae.Ret == -4:
-		return err.Error() + "\n  hint: the recipient has no session with the bot; send any message to the bot in WeChat first"
+		return err.Error() + "\n  hint: send allowance used up (10 per message from the recipient) or never messaged;\n        the recipient must send the bot any message in WeChat"
 	case ae.IsInvalidArgument():
 		return err.Error() + "\n  hint: invalid recipient or parameters"
 	case ae.IsSessionExpired():
@@ -128,9 +142,11 @@ func (e usageError) Error() string { return string(e) }
 // --- common flags ---
 
 type common struct {
-	fs    *flag.FlagSet
-	creds string
-	to    string
+	fs      *flag.FlagSet
+	creds   string
+	to      string
+	noQuota bool
+	counter *quota.Counter // loaded by pusher() unless noQuota
 }
 
 func newCommon(name string, withTo bool) *common {
@@ -152,6 +168,14 @@ func (c *common) credsPath() (string, error) {
 	return push.DefaultPath()
 }
 
+func (c *common) withQuotaFlag() {
+	c.fs.BoolVar(&c.noQuota, "no-quota", os.Getenv("WXILINK_NO_QUOTA") == "1", "do not count sends or append the reply note")
+}
+
+func quotaPath(credsPath string) string {
+	return strings.TrimSuffix(credsPath, filepath.Ext(credsPath)) + ".quota.json"
+}
+
 func (c *common) pusher() (*push.Pusher, error) {
 	path, err := c.credsPath()
 	if err != nil {
@@ -164,7 +188,29 @@ func (c *common) pusher() (*push.Pusher, error) {
 	if err != nil {
 		return nil, err
 	}
-	return push.New(creds), nil
+	p := push.New(creds)
+	if !c.noQuota {
+		if c.counter, err = quota.Load(quotaPath(path)); err != nil {
+			return nil, err
+		}
+		p.UseQuota(c.counter)
+	}
+	return p, nil
+}
+
+// saveQuota persists the counter if one was loaded. Errors are reported but
+// do not fail the command (the message was already sent).
+func (c *common) saveQuota() {
+	if c.counter == nil {
+		return
+	}
+	path, err := c.credsPath()
+	if err == nil {
+		err = c.counter.Save(quotaPath(path))
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "wxpush: warning: saving quota state:", err)
+	}
 }
 
 // --- commands ---
@@ -202,6 +248,7 @@ func cmdLogin(ctx context.Context, args []string) error {
 
 func cmdSend(ctx context.Context, args []string) error {
 	c := newCommon("send", true)
+	c.withQuotaFlag()
 	if err := c.fs.Parse(args); err != nil {
 		return usageError(err.Error())
 	}
@@ -221,6 +268,7 @@ func cmdSend(ctx context.Context, args []string) error {
 		return err
 	}
 	id, err := p.Text(ctx, c.to, text)
+	c.saveQuota()
 	if err != nil {
 		return err
 	}
@@ -230,6 +278,7 @@ func cmdSend(ctx context.Context, args []string) error {
 
 func cmdFile(ctx context.Context, args []string) error {
 	c := newCommon("file", true)
+	c.withQuotaFlag()
 	caption := c.fs.String("caption", "", "text sent before the file")
 	if err := c.fs.Parse(args); err != nil {
 		return usageError(err.Error())
@@ -246,7 +295,9 @@ func cmdFile(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return p.File(ctx, c.to, filepath.Base(path), data, *caption)
+	err = p.File(ctx, c.to, filepath.Base(path), data, *caption)
+	c.saveQuota()
+	return err
 }
 
 func cmdCheck(ctx context.Context, args []string) error {
@@ -319,6 +370,9 @@ func cmdProbe(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	// Measure raw behaviour: no nudges. Record a refusal in the counter.
+	p.UseQuota(nil)
+	defer c.saveQuota()
 	out := io.Writer(os.Stdout)
 	if *logPath != "" {
 		f, err := os.OpenFile(*logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
@@ -350,6 +404,13 @@ func cmdProbe(ctx context.Context, args []string) error {
 			accepted++
 		}
 		if ae != nil { // explicit refusal ends the probe; transport errors are retried
+			if c.counter != nil && ae.IsNoSession() {
+				to := c.to
+				if to == "" {
+					to = p.Credentials().ILinkUserID
+				}
+				c.counter.Refused(to)
+			}
 			fmt.Fprintf(os.Stderr, "refused at #%d after %s: %d accepted (%s)\n",
 				seq, time.Since(start).Round(time.Second), accepted, describe(err))
 			return nil
@@ -365,6 +426,34 @@ func cmdProbe(ctx context.Context, args []string) error {
 		case <-time.After(*interval):
 		}
 	}
+}
+
+func cmdQuota(args []string) error {
+	c := newCommon("quota", true)
+	reset := c.fs.Bool("reset", false, "mark the allowance as full (e.g. after the recipient replied)")
+	if err := c.fs.Parse(args); err != nil {
+		return usageError(err.Error())
+	}
+	p, err := c.pusher()
+	if err != nil {
+		return err
+	}
+	to := c.to
+	if to == "" {
+		to = p.Credentials().ILinkUserID
+	}
+	if *reset {
+		c.counter.Inbound(to)
+		c.saveQuota()
+	}
+	st := c.counter.Snapshot()[to]
+	since := "-"
+	if !st.Since.IsZero() {
+		since = st.Since.Format(time.RFC3339)
+	}
+	fmt.Printf("recipient: %s\nremaining: %d/%d\nused:      %d\nreset_at:  %s\n",
+		to, c.counter.Remaining(to), c.counter.Limit(), st.Used, since)
+	return nil
 }
 
 // printQR renders content as a QR code with Unicode half blocks.
