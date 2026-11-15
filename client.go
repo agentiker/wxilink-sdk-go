@@ -246,14 +246,26 @@ func (c *Client) GetUpdates(ctx context.Context, getUpdatesBuf string, timeoutMs
 }
 
 // SendMessage sends a raw message request.
+//
+// The iLink server reports most failures with HTTP 200 and a non-zero
+// ret/errcode in the body (e.g. {"ret":-2,"errmsg":"prepare failed"}
+// when the user has never messaged the bot). These are returned as *APIError.
 func (c *Client) SendMessage(ctx context.Context, msg *SendMessageReq) error {
 	msg.BaseInfo = c.buildBaseInfo()
-	_, err := c.doPost(ctx, "ilink/bot/sendmessage", msg, defaultAPITimeout)
-	return err
+	apiResp, err := c.doPost(ctx, "ilink/bot/sendmessage", msg, defaultAPITimeout)
+	if err != nil {
+		return err
+	}
+	return checkAPIError(apiResp.Body)
 }
 
 // SendText sends a plain text message to a user.
-// contextToken must come from the inbound message's ContextToken field.
+//
+// contextToken is optional. Pass the ContextToken of the inbound message
+// when replying; an empty value is accepted. Empirically the server only
+// requires that the user has messaged the bot before (an active session),
+// and does not validate the token — matching upstream openclaw-weixin, which
+// sends without context when the token is missing.
 func (c *Client) SendText(ctx context.Context, to, text, contextToken string) (string, error) {
 	clientID := generateClientID()
 	msg := &SendMessageReq{
@@ -285,6 +297,9 @@ func (c *Client) GetConfig(ctx context.Context, userID, contextToken string) (*G
 	if err != nil {
 		return nil, err
 	}
+	if err := checkAPIError(apiResp.Body); err != nil {
+		return nil, err
+	}
 	var resp GetConfigResp
 	if err := json.Unmarshal(apiResp.Body, &resp); err != nil {
 		return nil, fmt.Errorf("ilink: unmarshal getConfig: %w", err)
@@ -301,8 +316,11 @@ func (c *Client) SendTyping(ctx context.Context, userID, typingTicket string, st
 		Status:       status,
 		BaseInfo:     c.buildBaseInfo(),
 	}
-	_, err := c.doPost(ctx, "ilink/bot/sendtyping", reqBody, defaultConfigTimeout)
-	return err
+	apiResp, err := c.doPost(ctx, "ilink/bot/sendtyping", reqBody, defaultConfigTimeout)
+	if err != nil {
+		return err
+	}
+	return checkAPIError(apiResp.Body)
 }
 
 // GetUploadURL requests a pre-signed CDN upload URL.
@@ -310,6 +328,9 @@ func (c *Client) GetUploadURL(ctx context.Context, req *GetUploadURLReq) (*GetUp
 	req.BaseInfo = c.buildBaseInfo()
 	apiResp, err := c.doPost(ctx, "ilink/bot/getuploadurl", req, defaultAPITimeout)
 	if err != nil {
+		return nil, err
+	}
+	if err := checkAPIError(apiResp.Body); err != nil {
 		return nil, err
 	}
 	var resp GetUploadURLResp
@@ -337,13 +358,14 @@ func (c *Client) GetContextToken(userID string) (string, bool) {
 	return v.(string), true
 }
 
-// Push sends a proactive text message using a cached context token.
-// The target user must have previously sent a message so that a context
-// token is available. Returns [ErrNoContextToken] otherwise.
+// Push sends a proactive text message, using the cached context token for
+// the user if one exists (populated by [Client.Monitor] or
+// [Client.SetContextToken]).
+//
+// If no token is cached the message is sent without one. The server still
+// rejects users who have never messaged the bot; that surfaces as an
+// *APIError (ret=-2), not [ErrNoContextToken].
 func (c *Client) Push(ctx context.Context, to, text string) (string, error) {
-	token, ok := c.GetContextToken(to)
-	if !ok {
-		return "", ErrNoContextToken
-	}
+	token, _ := c.GetContextToken(to)
 	return c.SendText(ctx, to, text, token)
 }

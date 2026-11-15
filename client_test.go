@@ -86,11 +86,52 @@ func TestClient_ContextTokenCache(t *testing.T) {
 	}
 }
 
-func TestClient_Push_NoToken(t *testing.T) {
-	c := NewClient("")
+func TestClient_Push_NoToken_SendsWithoutToken(t *testing.T) {
+	var raw map[string]map[string]json.RawMessage
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&raw)
+		w.Write([]byte(`{"message_id":1}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient("tok", WithBaseURL(srv.URL))
+	if _, err := c.Push(context.Background(), "user1", "hello"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := raw["msg"]["context_token"]; ok {
+		t.Error("context_token should be omitted when none is cached")
+	}
+}
+
+func TestClient_Push_UsesCachedToken(t *testing.T) {
+	var received SendMessageReq
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&received)
+		w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient("tok", WithBaseURL(srv.URL))
+	c.SetContextToken("user1", "cached-tok")
+	if _, err := c.Push(context.Background(), "user1", "hello"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if received.Msg.ContextToken != "cached-tok" {
+		t.Errorf("contextToken = %q, want cached-tok", received.Msg.ContextToken)
+	}
+}
+
+func TestClient_Push_NoSession(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"ret":-2,"errmsg":"prepare failed"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient("tok", WithBaseURL(srv.URL))
 	_, err := c.Push(context.Background(), "user1", "hello")
-	if !errors.Is(err, ErrNoContextToken) {
-		t.Errorf("got %v, want ErrNoContextToken", err)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || !apiErr.IsNoSession() {
+		t.Fatalf("got %v, want *APIError with IsNoSession", err)
 	}
 }
 
@@ -291,5 +332,63 @@ func TestSendText_FromUserIDAlwaysSent(t *testing.T) {
 	json.Unmarshal(raw["msg"], &msg)
 	if _, ok := msg["from_user_id"]; !ok {
 		t.Error("from_user_id should always be present in JSON")
+	}
+}
+
+// The iLink server reports failures as HTTP 200 + non-zero ret/errcode.
+// These must surface as *APIError rather than being silently swallowed.
+func TestAPIErrorIn200Body(t *testing.T) {
+	cases := []struct {
+		name, body           string
+		wantRet, wantErrCode int
+	}{
+		{"no session", `{"ret":-2,"errmsg":"prepare failed"}`, -2, 0},
+		{"session timeout", `{"errcode":-14,"errmsg":"session timeout"}`, 0, -14},
+		{"rpc failed", `{"ret":-4,"errmsg":"GetTypingTicket rpc failed"}`, -4, 0},
+	}
+	calls := map[string]func(c *Client) error{
+		"SendText": func(c *Client) error {
+			_, err := c.SendText(context.Background(), "u", "hi", "")
+			return err
+		},
+		"GetConfig": func(c *Client) error {
+			_, err := c.GetConfig(context.Background(), "u", "")
+			return err
+		},
+		"SendTyping": func(c *Client) error {
+			return c.SendTyping(context.Background(), "u", "t", Typing)
+		},
+		"GetUploadURL": func(c *Client) error {
+			_, err := c.GetUploadURL(context.Background(), &GetUploadURLReq{})
+			return err
+		},
+	}
+	for _, tc := range cases {
+		for name, call := range calls {
+			t.Run(tc.name+"/"+name, func(t *testing.T) {
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Write([]byte(tc.body))
+				}))
+				defer srv.Close()
+
+				err := call(NewClient("tok", WithBaseURL(srv.URL)))
+				var apiErr *APIError
+				if !errors.As(err, &apiErr) {
+					t.Fatalf("got %v, want *APIError", err)
+				}
+				if apiErr.Ret != tc.wantRet || apiErr.ErrCode != tc.wantErrCode {
+					t.Errorf("got ret=%d errcode=%d, want ret=%d errcode=%d",
+						apiErr.Ret, apiErr.ErrCode, tc.wantRet, tc.wantErrCode)
+				}
+			})
+		}
+	}
+}
+
+func TestCheckAPIError_SuccessBodies(t *testing.T) {
+	for _, body := range []string{``, `{}`, `{"message_id":7527629586384703112}`, `{"ret":0}`, `not json`} {
+		if err := checkAPIError([]byte(body)); err != nil {
+			t.Errorf("body %q: unexpected error %v", body, err)
+		}
 	}
 }

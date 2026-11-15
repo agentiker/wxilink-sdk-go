@@ -13,14 +13,14 @@ go get github.com/agentiker/wxilink-sdk-go
 
 - 扫码登录，支持扫码/过期回调
 - 长轮询消息监听，自动重试与退避，动态超时
-- 主动推送（自动缓存 contextToken）
+- 主动推送（自动缓存 contextToken，缺失时照发）
 - 发送图片、视频、文件，MIME 自动路由
 - CDN 加密上传/下载（AES-128-ECB）
 - 语音消息解码（可插拔 SILK 解码器 + WAV 封装）
 - 输入状态指示器、Bot 配置
 - Functional Options 配置模式
 - `HTTPDoer` 接口，方便自定义传输层和测试
-- 结构化错误类型（`APIError`、`HTTPError`）
+- 结构化错误类型（`APIError`、`HTTPError`），正确识别 HTTP 200 里的 `ret`/`errcode` 错误
 - 零外部依赖，仅使用标准库
 
 ## 快速开始
@@ -121,12 +121,16 @@ Monitor 会自动缓存每个用户的 contextToken，供 `Push` 使用。服务
 ### 发送文本
 
 ```go
-// 回复消息（需要入站消息的 contextToken）
+// 回复消息（contextToken 可选，回复时建议回传入站消息的 ContextToken）
 client.SendText(ctx, userID, "你好", contextToken)
 
-// 主动推送（使用缓存的 contextToken）
+// 主动推送（有缓存的 contextToken 就带上，没有则不带）
 client.Push(ctx, userID, "这是一条定时通知")
 ```
+
+> **关于 contextToken**：实测 iLink 服务端只要求「用户曾给 Bot 发过消息」（存在会话），
+> 不校验 token 本身；与上游 `@tencent-weixin/openclaw-weixin` 行为一致（缺 token 时仅告警、照发）。
+> 从未互动过的用户会被拒绝：`ret=-2 prepare failed`，可用 `apiErr.IsNoSession()` 判断。
 
 ### 发送媒体
 
@@ -200,11 +204,22 @@ ilink.IsVideoMIME("video/mp4")            // true
 
 ## 错误处理
 
+iLink 几乎所有失败都返回 **HTTP 200**，错误在 body 的 `ret` / `errcode` 里。SDK 会把它们统一转成 `*APIError`
+（上游 v0.6.0 的 `SendMessage` / `SendTyping` / `GetConfig` 会静默吞掉这类错误，本 fork 已修复）。
+
+| 返回 | 含义 | 判断 |
+|---|---|---|
+| `ret=-2 prepare failed` | 目标用户与 Bot 无会话（未互动过 / 会话失效） | `IsNoSession()` |
+| `errcode=-14 session timeout` | bot_token 失效，需重新扫码 | `IsSessionExpired()` |
+
 ```go
 import "errors"
 
 var apiErr *ilink.APIError
 if errors.As(err, &apiErr) {
+    if apiErr.IsNoSession() {
+        // 该用户尚未给 Bot 发过消息，无法主动推送
+    }
     if apiErr.IsSessionExpired() {
         // 需要重新登录
     }
@@ -214,10 +229,6 @@ if errors.As(err, &apiErr) {
 var httpErr *ilink.HTTPError
 if errors.As(err, &httpErr) {
     fmt.Println(httpErr.StatusCode)
-}
-
-if errors.Is(err, ilink.ErrNoContextToken) {
-    // 该用户尚未发送过消息，无法主动推送
 }
 ```
 
