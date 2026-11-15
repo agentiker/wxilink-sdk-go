@@ -30,6 +30,12 @@ func (e *APIError) IsNoSession() bool {
 	return e.Ret == -2
 }
 
+// IsInvalidArgument reports whether the server rejected the request
+// parameters (ret -3 "invalid arguments"), e.g. an unknown to_user_id.
+func (e *APIError) IsInvalidArgument() bool {
+	return e.Ret == -3
+}
+
 // checkAPIError inspects a 2xx response body for the iLink error envelope
 // (non-zero ret or errcode) and returns it as *APIError. Empty or non-JSON
 // bodies are treated as success and left to the caller.

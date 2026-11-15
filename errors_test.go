@@ -48,3 +48,26 @@ func TestErrNoContextToken(t *testing.T) {
 		t.Error("sentinel error should match itself")
 	}
 }
+
+func TestAPIError_Classifiers(t *testing.T) {
+	tests := []struct {
+		err                         *APIError
+		noSession, invalid, expired bool
+	}{
+		{&APIError{Ret: -2, ErrMsg: "prepare failed"}, true, false, false},
+		{&APIError{Ret: -3, ErrMsg: "invalid arguments"}, false, true, false},
+		{&APIError{ErrCode: -14, ErrMsg: "session timeout"}, false, false, true},
+		{&APIError{Ret: -4}, false, false, false},
+	}
+	for _, tt := range tests {
+		if got := tt.err.IsNoSession(); got != tt.noSession {
+			t.Errorf("%v IsNoSession = %v", tt.err, got)
+		}
+		if got := tt.err.IsInvalidArgument(); got != tt.invalid {
+			t.Errorf("%v IsInvalidArgument = %v", tt.err, got)
+		}
+		if got := tt.err.IsSessionExpired(); got != tt.expired {
+			t.Errorf("%v IsSessionExpired = %v", tt.err, got)
+		}
+	}
+}

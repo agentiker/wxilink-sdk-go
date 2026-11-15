@@ -210,6 +210,7 @@ iLink 几乎所有失败都返回 **HTTP 200**，错误在 body 的 `ret` / `err
 | 返回 | 含义 | 判断 |
 |---|---|---|
 | `ret=-2 prepare failed` | 目标用户与 Bot 无会话（未互动过 / 会话失效） | `IsNoSession()` |
+| `ret=-3 invalid arguments` | 参数错误（如 to_user_id 无效） | `IsInvalidArgument()` |
 | `errcode=-14 session timeout` | bot_token 失效，需重新扫码 | `IsSessionExpired()` |
 
 ```go
