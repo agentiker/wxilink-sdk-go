@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"syscall"
 
-	ilink "github.com/openilink/openilink-sdk-go"
+	ilink "github.com/agentiker/wxilink-sdk-go"
 )
 
 func main() {

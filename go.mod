@@ -1,3 +1,3 @@
-module github.com/openilink/openilink-sdk-go
+module github.com/agentiker/wxilink-sdk-go
 
 go 1.22

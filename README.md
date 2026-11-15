@@ -1,9 +1,12 @@
-# openilink-sdk-go
+# wxilink-sdk-go
 
 微信 [iLink Bot API](https://ilinkai.weixin.qq.com) 的 Go SDK。
 
+> Fork 自 [openilink/openilink-sdk-go](https://github.com/openilink/openilink-sdk-go) v0.6.0（MIT），基线 tag：`upstream-v0.6.0`。
+> iLink 为腾讯非公开协议，本项目与腾讯无关联，仅供学习研究。
+
 ```
-go get github.com/openilink/openilink-sdk-go
+go get github.com/agentiker/wxilink-sdk-go
 ```
 
 ## 特性
@@ -33,7 +36,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	ilink "github.com/openilink/openilink-sdk-go"
+	ilink "github.com/agentiker/wxilink-sdk-go"
 )
 
 func main() {
