@@ -35,10 +35,14 @@ func randomWechatUIN() string {
 	return base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%d", n)))
 }
 
-func generateClientID() string {
+func generateClientID() string { return generateClientIDWithPrefix(DefaultClientIDPrefix) }
+
+// generateClientIDWithPrefix returns "<prefix>:<unix_ms>-<8 hex>", the format
+// used by upstream openclaw-weixin.
+func generateClientIDWithPrefix(prefix string) string {
 	b := make([]byte, 4)
 	_, _ = rand.Read(b)
-	return fmt.Sprintf("openclaw-weixin:%d-%s", time.Now().UnixMilli(), hex.EncodeToString(b))
+	return fmt.Sprintf("%s:%d-%s", prefix, time.Now().UnixMilli(), hex.EncodeToString(b))
 }
 
 // isTimeoutError reports whether err is a timeout (deadline exceeded)

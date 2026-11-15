@@ -21,8 +21,14 @@ const (
 	// DefaultBotType is the default bot_type parameter for QR login.
 	DefaultBotType = "3"
 
-	// iLinkAppID matches the ilink_appid field from the upstream openclaw-weixin package.json.
-	iLinkAppID = "bot"
+	// DefaultAppID matches the ilink_appid field from the upstream
+	// openclaw-weixin package.json. Sent as the iLink-App-Id header; the
+	// server rejects requests without it (errcode -14).
+	DefaultAppID = "bot"
+	// DefaultClientIDPrefix matches the client_id prefix used by upstream
+	// openclaw-weixin.
+	DefaultClientIDPrefix = "openclaw-weixin"
+
 	// iLinkChannelVersion tracks the upstream openclaw-weixin version we are compatible with.
 	iLinkChannelVersion = "2.1.6"
 
@@ -62,17 +68,27 @@ func WithVersion(v string) Option { return func(c *Client) { c.version = v } }
 // WithRouteTag sets the SKRouteTag header sent with every request.
 func WithRouteTag(tag string) Option { return func(c *Client) { c.routeTag = tag } }
 
+// WithAppID overrides the iLink-App-Id header (default [DefaultAppID]).
+// Only change this if upstream openclaw-weixin changes its ilink_appid.
+func WithAppID(id string) Option { return func(c *Client) { c.appID = id } }
+
+// WithClientIDPrefix overrides the client_id prefix used for outbound
+// messages (default [DefaultClientIDPrefix]).
+func WithClientIDPrefix(prefix string) Option { return func(c *Client) { c.clientIDPrefix = prefix } }
+
 // Client communicates with the Weixin iLink Bot API.
 type Client struct {
-	baseURL      string
-	cdnBaseURL   string
-	loginBaseURL string // fixed base URL for QR login; defaults to DefaultBaseURL
-	token        string
-	botType      string
-	version      string
-	routeTag     string
-	httpClient   HTTPDoer
-	silkDecoder  SILKDecoder
+	baseURL        string
+	cdnBaseURL     string
+	loginBaseURL   string // fixed base URL for QR login; defaults to DefaultBaseURL
+	token          string
+	botType        string
+	version        string
+	routeTag       string
+	appID          string
+	clientIDPrefix string
+	httpClient     HTTPDoer
+	silkDecoder    SILKDecoder
 
 	contextTokens sync.Map // map[userID]contextToken
 }
@@ -87,13 +103,15 @@ type Client struct {
 //	)
 func NewClient(token string, opts ...Option) *Client {
 	c := &Client{
-		baseURL:      DefaultBaseURL,
-		cdnBaseURL:   DefaultCDNBaseURL,
-		loginBaseURL: DefaultBaseURL,
-		token:        token,
-		botType:      DefaultBotType,
-		version:      iLinkChannelVersion,
-		httpClient:   &http.Client{},
+		baseURL:        DefaultBaseURL,
+		cdnBaseURL:     DefaultCDNBaseURL,
+		loginBaseURL:   DefaultBaseURL,
+		token:          token,
+		botType:        DefaultBotType,
+		version:        iLinkChannelVersion,
+		appID:          DefaultAppID,
+		clientIDPrefix: DefaultClientIDPrefix,
+		httpClient:     &http.Client{},
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -113,6 +131,8 @@ func (c *Client) Token() string { return c.token }
 // BaseURL returns the current API base URL.
 func (c *Client) BaseURL() string { return c.baseURL }
 
+func (c *Client) newClientID() string { return generateClientIDWithPrefix(c.clientIDPrefix) }
+
 func (c *Client) buildBaseInfo() *BaseInfo {
 	return &BaseInfo{ChannelVersion: c.version}
 }
@@ -120,7 +140,7 @@ func (c *Client) buildBaseInfo() *BaseInfo {
 // commonHeaders returns headers shared by all requests (GET and POST).
 func (c *Client) commonHeaders() http.Header {
 	h := http.Header{}
-	h.Set("iLink-App-Id", iLinkAppID)
+	h.Set("iLink-App-Id", c.appID)
 	h.Set("iLink-App-ClientVersion", fmt.Sprintf("%d", encodeClientVersion(c.version)))
 	if c.routeTag != "" {
 		h.Set("SKRouteTag", c.routeTag)
@@ -267,7 +287,7 @@ func (c *Client) SendMessage(ctx context.Context, msg *SendMessageReq) error {
 // and does not validate the token — matching upstream openclaw-weixin, which
 // sends without context when the token is missing.
 func (c *Client) SendText(ctx context.Context, to, text, contextToken string) (string, error) {
-	clientID := generateClientID()
+	clientID := c.newClientID()
 	msg := &SendMessageReq{
 		Msg: &WeixinMessage{
 			ToUserID:     to,

@@ -392,3 +392,49 @@ func TestCheckAPIError_SuccessBodies(t *testing.T) {
 		}
 	}
 }
+
+func TestIdentity_Defaults(t *testing.T) {
+	var gotAppID string
+	var received SendMessageReq
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAppID = r.Header.Get("iLink-App-Id")
+		json.NewDecoder(r.Body).Decode(&received)
+		w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient("tok", WithBaseURL(srv.URL))
+	id, err := c.SendText(context.Background(), "u", "hi", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotAppID != DefaultAppID {
+		t.Errorf("iLink-App-Id = %q, want %q", gotAppID, DefaultAppID)
+	}
+	if !strings.HasPrefix(id, DefaultClientIDPrefix+":") || received.Msg.ClientID != id {
+		t.Errorf("client_id = %q (sent %q), want prefix %q", id, received.Msg.ClientID, DefaultClientIDPrefix)
+	}
+}
+
+func TestIdentity_Overrides(t *testing.T) {
+	var gotAppID string
+	var received SendMessageReq
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAppID = r.Header.Get("iLink-App-Id")
+		json.NewDecoder(r.Body).Decode(&received)
+		w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient("tok", WithBaseURL(srv.URL), WithAppID("my-app"), WithClientIDPrefix("my-prefix"))
+	id, err := c.SendText(context.Background(), "u", "hi", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotAppID != "my-app" {
+		t.Errorf("iLink-App-Id = %q, want my-app", gotAppID)
+	}
+	if !strings.HasPrefix(id, "my-prefix:") || received.Msg.ClientID != id {
+		t.Errorf("client_id = %q (sent %q), want prefix my-prefix:", id, received.Msg.ClientID)
+	}
+}

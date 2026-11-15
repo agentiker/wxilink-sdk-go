@@ -26,7 +26,7 @@ func mediaAESKey(hexKey string) string {
 // SendImage sends an image message to a user.
 // Use [Client.UploadFile] with [MediaImage] to obtain the [UploadResult] first.
 func (c *Client) SendImage(ctx context.Context, to, contextToken string, uploaded *UploadResult) (string, error) {
-	clientID := generateClientID()
+	clientID := c.newClientID()
 	msg := &SendMessageReq{
 		Msg: &WeixinMessage{
 			ToUserID:     to,
@@ -58,7 +58,7 @@ func (c *Client) SendImage(ctx context.Context, to, contextToken string, uploade
 // SendVideo sends a video message to a user.
 // Use [Client.UploadFile] with [MediaVideo] to obtain the [UploadResult] first.
 func (c *Client) SendVideo(ctx context.Context, to, contextToken string, uploaded *UploadResult) (string, error) {
-	clientID := generateClientID()
+	clientID := c.newClientID()
 	msg := &SendMessageReq{
 		Msg: &WeixinMessage{
 			ToUserID:     to,
@@ -90,7 +90,7 @@ func (c *Client) SendVideo(ctx context.Context, to, contextToken string, uploade
 // SendFileAttachment sends a file attachment message to a user.
 // Use [Client.UploadFile] with [MediaFile] to obtain the [UploadResult] first.
 func (c *Client) SendFileAttachment(ctx context.Context, to, contextToken, fileName string, uploaded *UploadResult) (string, error) {
-	clientID := generateClientID()
+	clientID := c.newClientID()
 	msg := &SendMessageReq{
 		Msg: &WeixinMessage{
 			ToUserID:     to,
