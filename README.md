@@ -86,6 +86,8 @@ client := ilink.NewClient(token,
     ilink.WithVersion("1.0.2"),
     ilink.WithRouteTag("my-route-tag"),
     ilink.WithSILKDecoder(mySILKDecoder),
+    ilink.WithAppID("bot"),                    // iLink-App-Id 请求头，默认同上游
+    ilink.WithClientIDPrefix("openclaw-weixin"), // client_id 前缀，默认同上游
 )
 ```
 
@@ -128,9 +130,9 @@ client.SendText(ctx, userID, "你好", contextToken)
 client.Push(ctx, userID, "这是一条定时通知")
 ```
 
-> **关于 contextToken**：实测 iLink 服务端只要求「用户曾给 Bot 发过消息」（存在会话），
-> 不校验 token 本身；与上游 `@tencent-weixin/openclaw-weixin` 行为一致（缺 token 时仅告警、照发）。
-> 从未互动过的用户会被拒绝：`ret=-2 prepare failed`，可用 `apiErr.IsNoSession()` 判断。
+> **发送限制（实测，见下文「iLink 协议实测行为」）**：用户每给 Bot 发一条消息，Bot 可以向该用户发 **10 条**；
+> 用完后返回 `ret=-2 prepare failed`（`apiErr.IsNoSession()`），用户再发一条即恢复。
+> `contextToken` 不影响这一点：不传、传伪造值都照常发送。
 
 ### 发送媒体
 
@@ -257,6 +259,65 @@ ilink.ItemVideo    // 5
 ilink.StateNew        // 0
 ilink.StateGenerating // 1
 ilink.StateFinish     // 2
+```
+
+## 轻量推送：`push` 包与 `wxpush`
+
+只想「扫一次码，之后随时给自己发通知」，不需要跑完整 Bot：
+
+```bash
+go install github.com/agentiker/wxilink-sdk-go/cmd/wxpush@latest
+
+wxpush login                       # 终端显示二维码，用微信扫码；凭证存到 <UserConfigDir>/wxilink/credentials.json (0600)
+                                   # 然后在微信里给 Bot 发任意一条消息
+wxpush send "构建完成 ✅"           # 默认发给扫码的微信号
+printf '多行\n内容' | wxpush send -  # 从 stdin 读
+wxpush file -caption 日报 a.pdf    # 图片/视频/文件按扩展名自动识别
+wxpush check                       # 静默检查 token 是否有效（不发消息，不能预测配额）
+wxpush whoami
+wxpush probe -interval 3s          # 连续发带编号的消息直到被拒，实测配额
+```
+
+退出码：`0` 成功，`1` 错误，`2` 参数错误，`3` 无会话/配额用完（需在微信里给 Bot 发一条消息）。
+凭证路径优先级：`-creds` > `$WXILINK_CREDS` > 默认路径。
+
+Go 代码里使用：
+
+```go
+import "github.com/agentiker/wxilink-sdk-go/push"
+
+creds, err := push.Login(ctx, &push.LoginOptions{OnQRCode: func(url string) { /* 渲染二维码 */ }})
+creds.Save(path)
+
+p := push.New(creds)          // 或 push.Load(path)
+p.Text(ctx, "", "hello")      // "" = 扫码的微信号
+p.File(ctx, "", "a.png", data, "说明")
+```
+
+`ilink` 核心包保持零依赖；`rsc.io/qr` 仅被 `cmd/wxpush` 引用。
+
+## iLink 协议实测行为
+
+iLink 没有公开文档。以下是用真实服务端测出的行为，由 `live_test.go` 固化（`-tags live`）：
+
+| 行为 | 结论 |
+|---|---|
+| 错误返回方式 | 几乎总是 **HTTP 200**，错误在 body 的 `ret`/`errcode` |
+| 用户从未给 Bot 发过消息 | `sendmessage` → `ret=-2 prepare failed`，`getconfig` → `ret=-4` |
+| `context_token` | **不必需、不校验**：不传 / 传伪造值 / 传真实值，结果相同。与上游插件一致（缺 token 仅告警照发） |
+| 发送配额 | 用户每发 1 条消息，Bot 可向其发 **10 条**（文本、图片、文件、媒体的 caption 各算 1 条）。第 11 条 → `ret=-2`。与时间无关：31 秒内即可用完 |
+| 配额恢复 | 用户再发 1 条消息即恢复 10 条 |
+| `getconfig` | 只反映「是否互动过」，配额用完后仍返回成功，**不能**用来预测能否发送 |
+| 未知接收人 | `ret=-3 invalid arguments` |
+| bot_token 无效 | `errcode=-14 session timeout` |
+| 必需请求头 | 缺少 `AuthorizationType` / `iLink-App-Id` 等 → `errcode=-14` |
+
+**未测**：配额是否跨多条用户消息累加；没有新的用户消息时配额多久失效（时间窗口）；同一 Bot 面对多个用户时是否分别计数。
+
+运行 live 测试（会给你发 6 条消息，请先在微信里给 Bot 发一条）：
+
+```bash
+WXILINK_LIVE_CREDS=~/Library/Application\ Support/wxilink/credentials.json go test -tags live -run Live -v .
 ```
 
 ## 许可证
